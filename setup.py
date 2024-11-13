@@ -1,32 +1,26 @@
-from setuptools import setup
+from distutils.core import setup
 
 version = __import__('passbook').__version__
+install_requires = open('requirements.txt').readlines(),
 
 setup(
     name='Passbook',
     version=version,
-    author='Fernando Aramendi',
-    author_email='fernando@devartis.com',
+    author='Bastian Kuhn',
+    author_email='mail@bastian-kuhn.de',
     packages=['passbook', 'passbook.test'],
-    url='http://github.com/devartis/passbook/',
+    url='https://github.com/Bastian-Kuhn/wallet',
     license=open('LICENSE.txt').read(),
     description='Passbook file generator',
     long_description=open('README.md').read(),
 
-    download_url='http://pypi.python.org/packages/source/P/Passbook/Passbook-%s.tar.gz' % version,
+    install_requires=install_requires,
 
-    install_requires=[
-        'M2Crypto >= 0.28.2',
-    ],
-
-    classifiers=[
+    classifiers = [
         'Development Status :: 3 - Alpha',
         'Environment :: Other Environment',
         'Intended Audience :: Developers',
         'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3 :: Only',
         'Topic :: Software Development :: Libraries :: Python Modules',
     ],

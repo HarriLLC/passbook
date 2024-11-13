@@ -1,16 +1,61 @@
-# -*- coding: utf-8 -*-
+""" Apple Passbook """
+# pylint: disable=too-few-public-methods, too-many-instance-attributes
 import decimal
 import hashlib
-import json
-import zipfile
 from io import BytesIO
+import json
+import subprocess
+import zipfile
+import re
+import tempfile
 
-from M2Crypto import SMIME
-from M2Crypto import X509
-from M2Crypto.X509 import X509_Stack
+from .exceptions import PassParameterException
 
 
-class Alignment:
+def check_subfields(fields):
+    """ Check the fields insised a field list """
+    for field in fields:
+        date = field.get('dateStyle')
+        time = field.get('timeStyle')
+        regex \
+            = r'^(-?(?:[1-9][0-9]*)?[0-9]{4})-(1[0-2]|0[1-9])-(3[01]|0[1-9]|[12][0-9])T(2[0-3]|[01][0-9]):([0-5][0-9]):([0-5][0-9])(\.[0-9]+)?(Z|[+-](?:2[0-3]|[01][0-9]):[0-5][0-9])?$'
+        # need none here because of db model default
+        if date or time:
+            match_iso8601 = re.compile(regex).match
+            if match_iso8601(field['value']) is None:
+                raise PassParameterException("Date does not match iso8601 format")
+
+def field_checks(field_name, field_data):
+    """ Check Field Contents if the valid """
+    if field_name == 'webServiceURL':
+        if not field_data.startswith('https://'):
+            raise PassParameterException("Webservie Url need to start with https://")
+
+    if field_name == 'serialNumber':
+        if not isinstance(field_data, str):
+            raise PassParameterException("Serial Needs to be a String")
+        if len(field_data) <= 16:
+            raise PassParameterException("Serial Number to Short")
+
+    if field_name == 'headerFields':
+        if len(field_data) > 3:
+            raise PassParameterException("To many Header Fields (>3)")
+        check_subfields(field_data)
+
+    if field_name == 'primaryFields':
+        check_subfields(field_data)
+
+    if field_name == 'secondaryFields':
+        check_subfields(field_data)
+
+    if field_name == 'auxiliaryFields':
+        check_subfields(field_data)
+
+    if field_name == 'backFields':
+        check_subfields(field_data)
+
+class Alignment():
+    """ Text Alignment """
     LEFT = 'PKTextAlignmentLeft'
     CENTER = 'PKTextAlignmentCenter'
     RIGHT = 'PKTextAlignmentRight'
@@ -18,14 +63,15 @@ class Alignment:
     NATURAL = 'PKTextAlignmentNatural'
 
 
-class BarcodeFormat:
+class BarcodeFormat():
+    """ Barcode Format"""
     PDF417 = 'PKBarcodeFormatPDF417'
     QR = 'PKBarcodeFormatQR'
     AZTEC = 'PKBarcodeFormatAztec'
-    CODE128 = 'PKBarcodeFormatCode128'
 
 
-class TransitType:
+class TransitType():
+    """ Transit Type for Boarding Passes """
     AIR = 'PKTransitTypeAir'
     TRAIN = 'PKTransitTypeTrain'
     BUS = 'PKTransitTypeBus'
@@ -33,7 +79,8 @@ class TransitType:
     GENERIC = 'PKTransitTypeGeneric'
 
 
-class DateStyle:
+class DateStyle():
+    """ Date Style """
     NONE = 'PKDateStyleNone'
     SHORT = 'PKDateStyleShort'
     MEDIUM = 'PKDateStyleMedium'
@@ -41,201 +88,360 @@ class DateStyle:
     FULL = 'PKDateStyleFull'
 
 
-class NumberStyle:
+class NumberStyle():
+    """ Number Style """
     DECIMAL = 'PKNumberStyleDecimal'
     PERCENT = 'PKNumberStylePercent'
     SCIENTIFIC = 'PKNumberStyleScientific'
     SPELLOUT = 'PKNumberStyleSpellOut'
 
+class Field():
+    """ Wallet Text Field"""
 
-class Field(object):
+    def __init__(self, **kwargs):
+        """
+         Initiate Field
 
-    def __init__(self, key, value, label=''):
+        :param key: The key must be unique within the scope
+        :param value: Value of the Field
+        :param attributed_value: Optional. Attributed value of the field.
+        :param label: Optional Label Text for field
+        :param change_message: Optional. String that is displayed when the pass is updated
+        :param text_alignment: left/ center/ right, justified, natural
+        :return: Nothing
 
-        self.key = key  # Required. The key must be unique within the scope
-        self.value = value  # Required. Value of the field. For example, 42
-        self.label = label  # Optional. Label text for the field.
-        self.changeMessage = ''  # Optional. Format string for the alert text that is displayed when the pass is updated
-        self.textAlignment = Alignment.LEFT
+        """
+        # pylint: disable=invalid-name
+        self.key = kwargs['key']
+        if 'attributed_value' in kwargs:
+            self.attributedValue = kwargs['attributed_value']
+        self.value = kwargs['value']
+        self.label = kwargs.get('label', '')
+        if 'change_message' in kwargs:
+            self.changeMessage = kwargs['change_message'] # Don't Populate key if not needed
+        self.textAlignment = {
+            'left': Alignment.LEFT,
+            'center': Alignment.CENTER,
+            'right': Alignment.RIGHT,
+            'justified': Alignment.JUSTIFIED,
+            'natural': Alignment.NATURAL,
+        }.get(kwargs.get('text_alignment', 'left'))
 
     def json_dict(self):
+        """ Return dict object from class """
         return self.__dict__
 
 
 class DateField(Field):
+    """ Wallet Date Field """
 
-    def __init__(self, key, value, label='', dateStyle=DateStyle.SHORT,
-                 timeStyle=DateStyle.SHORT, ignoresTimeZone=False):
-        super().__init__(key, value, label)
-        self.dateStyle = dateStyle  # Style of date to display
-        self.timeStyle = timeStyle  # Style of time to display
-        self.isRelative = False  # If true, the labels value is displayed as a relative date
-        if ignoresTimeZone:
-            self.ignoresTimeZone = ignoresTimeZone
+    def __init__(self, **kwargs):
+        """
+        Initiate Field
+
+        :param key: The key must be unique within the scope
+        :param value: Value of the Field
+        :param label: Optional Label Text for field
+        :param change_message: Optional. String that is displayed when the pass is updated
+        :param text_alignment: left/ center/ right, justified, natural
+        :param date_style: none/short/medium/long/full
+        :param time_style: none/short/medium/long/full
+        :param is_relativ: True/False
+        """
+        #pylint: disable=invalid-name
+
+        super(DateField, self).__init__(**kwargs)
+        styles = {
+            "none": DateStyle.NONE,
+            "short": DateStyle.SHORT,
+            "medium": DateStyle.MEDIUM,
+            "long": DateStyle.LONG,
+            "full": DateStyle.FULL,
+        }
+
+        self.dateStyle = styles.get(kwargs.get('date_style', 'short'))
+        self.timeStyle = styles.get(kwargs.get('time_style', 'short'))
+        self.isRelative = kwargs.get('is_relativ', False)
 
     def json_dict(self):
+        """ Return dict object from class """
         return self.__dict__
 
 
 class NumberField(Field):
+    """ Number Field """
 
-    def __init__(self, key, value, label=''):
-        super().__init__(key, value, label)
-        self.numberStyle = NumberStyle.DECIMAL  # Style of date to display
+    def __init__(self, **kwargs):
+        """
+        Initiate Field
+
+        :param key: The key must be unique within the scope
+        :param value: Value of the Field
+        :param label: Optional Label Text for field
+        :param change_message: Optional. String that is displayed when the pass is updated
+        :param text_alignment: left/ center/ right, justified, natural
+        :param number_style: decimal/percent/scientific/spellout.
+        """
+        #pylint: disable=invalid-name
+
+        super(NumberField, self).__init__(**kwargs)
+        self.numberStyle = {
+            'decimal' : NumberStyle.DECIMAL,
+            'percent' : NumberStyle.PERCENT,
+            'scientific' : NumberStyle.SCIENTIFIC,
+            'spellout' : NumberStyle.SPELLOUT,
+        }.get(kwargs.get('number_style', 'decimal'))
+        self.value = float(self.value)
 
     def json_dict(self):
+        """ Return dict object from class """
         return self.__dict__
 
 
 class CurrencyField(Field):
+    """ Currency Field """
 
-    def __init__(self, key, value, label='', currencyCode=''):
-        super().__init__(key, value, label)
-        self.currencyCode = currencyCode  # ISO 4217 currency code
+    def __init__(self, **kwargs):
+        """
+        Initiate Field
+
+        :param key: The key must be unique within the scope
+        :param value: Value of the Field
+        :param label: Optional Label Text for field
+        :param change_message: Optional. String that is displayed when the pass is updated
+        :param text_alignment: left/ center/ right, justified, natural
+        :param currency_code: ISO 4217 currency Code
+        """
+        #pylint: disable=invalid-name
+
+        super(CurrencyField, self).__init__(**kwargs)
+        self.currencyCode = kwargs['currency_code']
+        self.value = float(self.value)
 
     def json_dict(self):
+        """ Return dict object from class """
         return self.__dict__
 
 
-class Barcode(object):
+class Barcode():
+    """
+    Barcode Field
+    """
 
-    def __init__(self, message, format=BarcodeFormat.PDF417, altText='', messageEncoding='iso-8859-1'):
-        self.format = format
-        self.message = message  # Required. Message or payload to be displayed as a barcode
-        self.messageEncoding = messageEncoding  # Required. Text encoding that is used to convert the message
-        if altText:
-            self.altText = altText  # Optional. Text displayed near the barcode
+    def __init__(self, **kwargs):
+        """
+        Initiate Field
+
+        :param message: Message or Payload for Barcdoe
+        :param format: pdf417/ qr/ aztec
+        :param encoding: Default utf-8
+        :param alt_text: Optional Text displayed near the barcode
+        """
+
+        #pylint: disable=invalid-name
+        self.format = {
+            'pdf417' : BarcodeFormat.PDF417,
+            'qr' : BarcodeFormat.QR,
+            'aztec' : BarcodeFormat.AZTEC,
+        }.get(kwargs['format'], 'qr')
+        self.message = kwargs['message']
+        self.messageEncoding = kwargs.get('encoding', 'iso-8859-1')
+        self.altText = kwargs.get('alt_text', '')
 
     def json_dict(self):
+        """ Return dict object from class """
         return self.__dict__
 
 
-class Location(object):
+class Location():
+    """
+    Pass Location Object
+    """
 
-    def __init__(self, latitude, longitude, altitude=0.0):
-        # Required. Latitude, in degrees, of the location.
-        try:
-            self.latitude = float(latitude)
-        except (ValueError, TypeError):
-            self.latitude = 0.0
-        # Required. Longitude, in degrees, of the location.
-        try:
-            self.longitude = float(longitude)
-        except (ValueError, TypeError):
-            self.longitude = 0.0
-        # Optional. Altitude, in meters, of the location.
-        try:
-            self.altitude = float(altitude)
-        except (ValueError, TypeError):
-            self.altitude = 0.0
-        # Optional. Notification distance
-        self.distance = None
-        # Optional. Text displayed on the lock screen when
-        # the pass is currently near the location
-        self.relevantText = ''
+    def __init__(self, **kwargs):
+        """
+        Fill Location Object.
+
+        :param latitude: Latitude Float
+        :param longitude: Longitude Float
+        :param altitude: optional
+        :param distance: optional
+        :param relevant_text: optional
+        :return: Nothing
+
+        """
+        # pylint: disable=invalid-name
+
+        for name in ['latitude', 'longitude', 'altitude']:
+            try:
+                setattr(self, name, float(kwargs[name]))
+            except (ValueError, TypeError, KeyError):
+                setattr(self, name, 0.0)
+        if 'distance' in kwargs:
+            self.distance = kwarg['distance']
+        self.relevantText = kwargs.get('relevant_text', '')
 
     def json_dict(self):
+        """ Return dict object from class """
         return self.__dict__
 
 
-class IBeacon(object):
-    def __init__(self, proximityuuid, major, minor):
-        # IBeacon data
-        self.proximityUUID = proximityuuid
-        self.major = major
-        self.minor = minor
+class IBeacon():
+    """ iBeacon """
 
-        # Optional. Text message where near the ibeacon
-        self.relevantText = ''
+    def __init__(self, **kwargs):
+        """
+        Create Beacon
+        :param proximity_uuid:
+        :param major:
+        :param minor:
+        :param relevant_text: Option Text shown when near the ibeacon
+        """
+        # pylint: disable=invalid-name
+
+        self.proximityUUID = kwargs['proximity_uuid']
+        self.major = kwargs['major']
+        self.minor = kwargs['minor']
+
+        self.relevantText = kwargs.get('relevant_text', '')
 
     def json_dict(self):
+        """ Return dict object from class """
         return self.__dict__
 
 
-class PassInformation(object):
+class PassInformation():
+    """
+    Basis Fields for Wallet Passes
+    """
 
     def __init__(self):
+        # pylint: disable=invalid-name
         self.headerFields = []
         self.primaryFields = []
         self.secondaryFields = []
         self.backFields = []
         self.auxiliaryFields = []
 
-    def addHeaderField(self, key, value, label):
-        self.headerFields.append(Field(key, value, label))
+    def add_header_field(self, **kwargs):
+        """
+        Add Simple Field to Header
+        :param key:
+        :param value:
+        :param label: optional
+        """
+        self.headerFields.append(Field(**kwargs))
 
-    def addPrimaryField(self, key, value, label):
-        self.primaryFields.append(Field(key, value, label))
+    def add_primary_field(self, **kwargs):
+        """
+        Add Simple Primary Field
+        :param key:
+        :param value:
+        :param label: optional
+        """
+        self.primaryFields.append(Field(**kwargs))
 
-    def addSecondaryField(self, key, value, label):
-        self.secondaryFields.append(Field(key, value, label))
+    def add_secondary_field(self, **kwargs):
+        """
+        Add Simple Secondary Field
+        :param key:
+        :param value:
+        :param label: optional
+        """
+        self.secondaryFields.append(Field(**kwargs))
 
-    def addBackField(self, key, value, label):
-        self.backFields.append(Field(key, value, label))
+    def add_back_field(self, **kwargs):
+        """
+        Add Simple Back Field
+        :param key:
+        :param value:
+        :param label: optional
+        """
+        self.backFields.append(Field(**kwargs))
 
-    def addAuxiliaryField(self, key, value, label):
-        self.auxiliaryFields.append(Field(key, value, label))
+    def add_auxiliary_field(self, **kwargs):
+        """
+        Add Simple Auxilary Field
+        :param key:
+        :param value:
+        :param label: optional
+        """
+        self.auxiliaryFields.append(Field(**kwargs))
 
     def json_dict(self):
-        d = {}
-        if self.headerFields:
-            d.update({'headerFields': [f.json_dict() for f in self.headerFields]})
-        if self.primaryFields:
-            d.update({'primaryFields': [f.json_dict() for f in self.primaryFields]})
-        if self.secondaryFields:
-            d.update({'secondaryFields': [f.json_dict() for f in self.secondaryFields]})
-        if self.backFields:
-            d.update({'backFields': [f.json_dict() for f in self.backFields]})
-        if self.auxiliaryFields:
-            d.update({'auxiliaryFields': [f.json_dict() for f in self.auxiliaryFields]})
-        return d
+        """
+        Create Json object of all Fields
+        """
+        data = {}
+        for what in ['headerFields', 'primaryFields', 'secondaryFields',
+                     'backFields', 'auxiliaryFields']:
+            if hasattr(self, what):
+                field_data = [f.json_dict() for f in getattr(self, what)]
+                field_checks(what, field_data)
+                data.update({what: field_data})
+        return data
 
 
 class BoardingPass(PassInformation):
+    """ Wallet Boarding Pass """
 
     def __init__(self, transitType=TransitType.AIR):
-        super().__init__()
+        #pylint: disable=invalid-name
+        super(BoardingPass, self).__init__()
         self.transitType = transitType
         self.jsonname = 'boardingPass'
 
     def json_dict(self):
-        d = super().json_dict()
-        d.update({'transitType': self.transitType})
-        return d
+        data = super(BoardingPass, self).json_dict()
+        data.update({'transitType': self.transitType})
+        return data
 
 
 class Coupon(PassInformation):
+    """ Wallet Coupon Pass """
 
     def __init__(self):
-        super().__init__()
+        super(Coupon, self).__init__()
         self.jsonname = 'coupon'
 
 
 class EventTicket(PassInformation):
+    """ Wallet Event Ticket """
 
     def __init__(self):
-        super().__init__()
+        super(EventTicket, self).__init__()
         self.jsonname = 'eventTicket'
 
 
 class Generic(PassInformation):
+    """ Wallet Generic Pass """
 
     def __init__(self):
-        super().__init__()
+        super(Generic, self).__init__()
         self.jsonname = 'generic'
 
 
 class StoreCard(PassInformation):
+    """ Wallet Store Card """
 
     def __init__(self):
-        super().__init__()
+        super(StoreCard, self).__init__()
         self.jsonname = 'storeCard'
 
 
-class Pass(object):
+class Pass():
+    """ Apple Wallet Pass Object """
 
-    def __init__(self, passInformation, json='', passTypeIdentifier='',
-                 organizationName='', teamIdentifier=''):
+    def __init__(self, **kwargs):
+        """
+        Prepare Pass
+        :params pass_information:
+        :params pass_type_identifier:
+        :params organization_name:
+        :params team_identifier:
+        """
+
+        #pylint: disable=invalid-name
 
         self._files = {}  # Holds the files to include in the .pkpass
         self._hashes = {}  # Holds the SHAs of the files array
@@ -244,19 +450,19 @@ class Pass(object):
 
         # Required. Team identifier of the organization that originated and
         # signed the pass, as issued by Apple.
-        self.teamIdentifier = teamIdentifier
+        self.teamIdentifier = kwargs['team_identifier']
         # Required. Pass type identifier, as issued by Apple. The value must
         # correspond with your signing certificate. Used for grouping.
-        self.passTypeIdentifier = passTypeIdentifier
+        self.passTypeIdentifier = kwargs['pass_type_identifier']
         # Required. Display name of the organization that originated and
         # signed the pass.
-        self.organizationName = organizationName
+        self.organizationName = kwargs['organization_name']
         # Required. Serial number that uniquely identifies the pass.
         self.serialNumber = ''
         # Required. Brief description of the pass, used by the iOS
         # accessibility technologies.
         self.description = ''
-        # Required. Version of the file format. The value must be 1.
+        # Required.
         self.formatVersion = 1
 
         # Visual Appearance Keys
@@ -264,8 +470,9 @@ class Pass(object):
         self.foregroundColor = None  # Optional. Foreground color of the pass,
         self.labelColor = None  # Optional. Color of the label text
         self.logoText = None  # Optional. Text displayed next to the logo
-        self.barcode = None  # Optional. Information specific to barcodes.  This is deprecated and can only be set to original barcode formats.
-        self.barcodes = None #Optional.  All supported barcodes
+        self.barcode = None  # Optional. Information specific to barcodes.
+        self.barcodes = []
+
         # Optional. If true, the strip image is displayed
         self.suppressStripShine = False
 
@@ -280,9 +487,9 @@ class Pass(object):
 
         # Optional. Locations where the pass is relevant.
         # For example, the location of your store.
-        self.locations = None
+        self.locations = []
         # Optional. IBeacons data
-        self.ibeacons = None
+        self.ibeacons = []
         # Optional. Date and time when the pass becomes relevant
         self.relevantDate = None
 
@@ -293,145 +500,183 @@ class Pass(object):
         # Optional. Additional hidden data in json for the passbook
         self.userInfo = None
 
-        self.expirationDate = None
+        self.exprirationDate = None
         self.voided = None
 
-        self.passInformation = passInformation
+        self.passInformation = kwargs['pass_information']
 
-    # Adds file to the file array
-    def addFile(self, name, fd):
-        self._files[name] = fd.read()
+    def add_file(self, name, file_handle):
+        """
+        Add file to the file
+        :params name: String name
+        :params file_handle: File Handle
+        """
+        self._files[name] = file_handle.read()
 
     # Creates the actual .pkpass file
-    def create(self, certificate, key, wwdr_certificate, password, zip_file=None):
-        pass_json = self._createPassJson()
-        manifest = self._createManifest(pass_json)
-        signature = self._createSignature(manifest, certificate, key, wwdr_certificate, password)
-        if not zip_file:
-            zip_file = BytesIO()
-        self._createZip(pass_json, manifest, signature, zip_file=zip_file)
-        return zip_file
-
-    def _createPassJson(self):
-        return json.dumps(self, default=PassHandler)
-
-    def _createManifest(self, pass_json):
+    def create(self, certificate, key, wwdr_certificate, password=False, file_name=None, filemode=True):
         """
-        Creates the hashes for all the files included in the pass file.
+        Create .pkass File
         """
-        self._hashes['pass.json'] = hashlib.sha1(pass_json.encode('utf-8')).hexdigest()
+        # pylint: disable=too-many-arguments
+        pass_json = self._create_pass_json()
+        manifest = self._create_manifest(pass_json)
+        signature = self._create_signature(manifest, certificate, key, wwdr_certificate, password, filemode)
+        if not file_name:
+            file_name = BytesIO()
+        datei = self._create_zip(pass_json, manifest, signature, file_name=file_name)
+        return datei
+
+    def _create_pass_json(self):
+        """
+        Create Json Pass Files
+        """
+        return json.dumps(self, default=pass_handler).encode('utf-8')
+
+    def _create_manifest(self, pass_json):
+        """
+        Creates the hashes for the files and adds them
+        into a json string
+        """
+        # Creates SHA hashes for all files in package
+        self._hashes['pass.json'] = hashlib.sha1(pass_json).hexdigest()
         for filename, filedata in self._files.items():
             self._hashes[filename] = hashlib.sha1(filedata).hexdigest()
-        return json.dumps(self._hashes)
+        return json.dumps(self._hashes).encode('utf-8')
 
-    def _get_smime(self, certificate, key, wwdr_certificate, password):
-        """
-        :return: M2Crypto.SMIME.SMIME
-        """
-        def passwordCallback(*args, **kwds):
-            return bytes(password, encoding='ascii')
+    def _create_signature(self, manifest, certificate, key,
+                          wwdr_certificate, password, filemode):
+        """ Create and Save Signature """
+        # pylint: disable=no-self-use, too-many-arguments
+        if not filemode:
+            #Use Tempfile
+            cert_file = tempfile.NamedTemporaryFile(mode='w')
+            cert_file.write(certificate)
+            cert_file.flush()
+            key_file = tempfile.NamedTemporaryFile(mode='w')
+            key_file.write(key)
+            key_file.flush()
+            wwdr_file = tempfile.NamedTemporaryFile(mode='w')
+            wwdr_file.write(wwdr_certificate)
+            wwdr_file.flush()
+            certificate = cert_file.name
+            key = key_file.name
+            wwdr_certificate = wwdr_file.name
 
-        smime = SMIME.SMIME()
+        openssl_cmd = [
+            'openssl',
+            'smime',
+            '-binary',
+            '-sign',
+            '-certfile',
+            wwdr_certificate,
+            '-signer',
+            certificate,
+            '-inkey',
+            key,
+            '-outform',
+            'DER',
+            '-passin',
+            'pass:{}'.format(password),
+        ]
 
-        wwdrcert = X509.load_cert(wwdr_certificate)
-        stack = X509_Stack()
-        stack.push(wwdrcert)
-        smime.set_x509_stack(stack)
-
-        smime.load_key(key, certfile=certificate, callback=passwordCallback)
-        return smime
-
-    def _sign_manifest(self, manifest, certificate, key, wwdr_certificate, password):
-        """
-        :return: M2Crypto.SMIME.PKCS7
-        """
-        smime = self._get_smime(certificate, key, wwdr_certificate, password)
-        pkcs7 = smime.sign(
-            SMIME.BIO.MemoryBuffer(bytes(manifest, encoding='utf8')),
-            flags=SMIME.PKCS7_DETACHED | SMIME.PKCS7_BINARY
+        process = subprocess.Popen(
+            openssl_cmd,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stdin=subprocess.PIPE,
         )
-        return pkcs7
+        process.stdin.write(manifest)
+        der, error = process.communicate()
+        if process.returncode != 0:
+            raise Exception(error)
 
-    def _createSignature(self, manifest, certificate, key,
-                         wwdr_certificate, password):
-        """
-        Creates a signature (DER encoded) of the manifest. The manifest is the file
-        containing a list of files included in the pass file (and their hashes).
-        """
-        pk7 = self._sign_manifest(manifest, certificate, key, wwdr_certificate, password)
-        der = SMIME.BIO.MemoryBuffer()
-        pk7.write_der(der)
-        return der.read()
+        return der
+
 
     # Creates .pkpass (zip archive)
-    def _createZip(self, pass_json, manifest, signature, zip_file=None):
-        zf = zipfile.ZipFile(zip_file or 'pass.pkpass', 'w')
-        zf.writestr('signature', signature)
-        zf.writestr('manifest.json', manifest)
-        zf.writestr('pass.json', pass_json)
+    def _create_zip(self, pass_json, manifest, signature, file_name=None):
+        """
+        Creats .pkass ZIP Archive
+        """
+        z_file = zipfile.ZipFile(file_name or 'pass.pkpass', 'w')
+        z_file.writestr('signature', signature)
+        z_file.writestr('manifest.json', manifest)
+        z_file.writestr('pass.json', pass_json)
         for filename, filedata in self._files.items():
-            zf.writestr(filename, filedata)
-        zf.close()
+            z_file.writestr(filename, filedata)
+        z_file.close()
+        return file_name
+
 
     def json_dict(self):
-        d = {
-            'description': self.description,
-            'formatVersion': self.formatVersion,
-            'organizationName': self.organizationName,
-            'passTypeIdentifier': self.passTypeIdentifier,
-            'serialNumber': self.serialNumber,
-            'teamIdentifier': self.teamIdentifier,
-            'suppressStripShine': self.suppressStripShine,
-            self.passInformation.jsonname: self.passInformation.json_dict()
-        }
-        #barcodes have 2 fields, 'barcode' is legacy so limit it to the legacy formats, 'barcodes' supports all
-        if self.barcode:
-            original_formats = [BarcodeFormat.PDF417, BarcodeFormat.QR, BarcodeFormat.AZTEC]
-            legacyBarcode = self.barcode
-            newBarcodes = [self.barcode.json_dict()]
-            if self.barcode.format not in original_formats:
-                legacyBarcode = Barcode(self.barcode.message, BarcodeFormat.PDF417, self.barcode.altText)
-            d.update({'barcodes': newBarcodes})
-            d.update({'barcode': legacyBarcode})
+        """
+        Return Pass as JSON Dict
+        """
+        simple_fields = [
+            'description',
+            'formatVersion',
+            'organizationName',
+            'passTypeIdentifier',
+            'serialNumber',
+            'teamIdentifier',
+            'suppressStripShine'
+            'relevantDate',
+            'backgroundColor',
+            'foregroundColor',
+            'labelColor',
+            'logoText',
+            'ibeacons',
+            'userInfo',
+            'voided',
+            'associatedStoreIdentifiers',
+            'appLaunchURL',
+            'exprirationDate',
+            'webServiceURL',
+            'authenticationToken',
+        ]
+        data = {}
+        data[self.passInformation.jsonname] = self.passInformation.json_dict()
+        for field in simple_fields:
+            if hasattr(self, field):
+                content = getattr(self, field)
+                if content:
+                    field_checks(field, content)
+                    data[field] = content
 
-        if self.relevantDate:
-            d.update({'relevantDate': self.relevantDate})
-        if self.backgroundColor:
-            d.update({'backgroundColor': self.backgroundColor})
-        if self.foregroundColor:
-            d.update({'foregroundColor': self.foregroundColor})
-        if self.labelColor:
-            d.update({'labelColor': self.labelColor})
-        if self.logoText:
-            d.update({'logoText': self.logoText})
+        if self.barcodes:
+            data['barcodes'] = []
+            for barcode in self.barcodes:
+                data['barcodes'].append(barcode.json_dict())
+
         if self.locations:
-            d.update({'locations': self.locations})
+            data['locations'] = []
+            for location in self.locations:
+                data['locations'].append(location.json_dict())
+            if len(data['locations']) >= 10:
+                raise PassParameterException("Field locations has more then 10 entries")
+
         if self.ibeacons:
-            d.update({'beacons': self.ibeacons})
-        if self.userInfo:
-            d.update({'userInfo': self.userInfo})
-        if self.associatedStoreIdentifiers:
-            d.update(
-                {'associatedStoreIdentifiers': self.associatedStoreIdentifiers}
-            )
-        if self.appLaunchURL:
-            d.update({'appLaunchURL': self.appLaunchURL})
-        if self.expirationDate:
-            d.update({'expirationDate': self.expirationDate})
-        if self.voided:
-            d.update({'voided': True})
-        if self.webServiceURL:
-            d.update({'webServiceURL': self.webServiceURL,
-                      'authenticationToken': self.authenticationToken})
-        return d
+            data['ibeacons'] = []
+            for ibeacon in self.ibeacons:
+                data['ibeacons'].append(ibeacon.json_dict())
+
+        requied_fields = [
+            'description', 'formatVersion',
+            'organizationName', 'organizationName',
+            'serialNumber', 'teamIdentifier'
+        ]
+        for field in requied_fields:
+            if field not in data:
+                raise PassParameterException("Field {} missing".format(field))
+        return data
 
 
-def PassHandler(obj):
+def pass_handler(obj):
+    """ Pass Handler """
     if hasattr(obj, 'json_dict'):
         return obj.json_dict()
-    else:
-        # For Decimal latitude and logitude etc.
-        if isinstance(obj, decimal.Decimal):
-            return str(obj)
-        else:
-            return obj
+    # For Decimal latitude and logitude etc.
+    if isinstance(obj, decimal.Decimal):
+        return str(obj)
+    return obj
