@@ -223,33 +223,16 @@ class CurrencyField(Field):
         return self.__dict__
 
 
-class Barcode():
-    """
-    Barcode Field
-    """
+class Barcode(object):
 
-    def __init__(self, **kwargs):
-        """
-        Initiate Field
+    def __init__(self, message, format=BarcodeFormat.PDF417, altText=''):
 
-        :param message: Message or Payload for Barcdoe
-        :param format: pdf417/ qr/ aztec
-        :param encoding: Default utf-8
-        :param alt_text: Optional Text displayed near the barcode
-        """
-
-        #pylint: disable=invalid-name
-        self.format = {
-            'pdf417' : BarcodeFormat.PDF417,
-            'qr' : BarcodeFormat.QR,
-            'aztec' : BarcodeFormat.AZTEC,
-        }.get(kwargs['format'], 'qr')
-        self.message = kwargs['message']
-        self.messageEncoding = kwargs.get('encoding', 'iso-8859-1')
-        self.altText = kwargs.get('alt_text', '')
+        self.format = format
+        self.message = message  # Required. Message or payload to be displayed as a barcode
+        self.messageEncoding = 'iso-8859-1'  # Required. Text encoding that is used to convert the message
+        self.altText = altText  # Optional. Text displayed near the barcode
 
     def json_dict(self):
-        """ Return dict object from class """
         return self.__dict__
 
 
@@ -471,7 +454,6 @@ class Pass():
         self.labelColor = None  # Optional. Color of the label text
         self.logoText = None  # Optional. Text displayed next to the logo
         self.barcode = None  # Optional. Information specific to barcodes.
-        self.barcodes = []
 
         # Optional. If true, the strip image is displayed
         self.suppressStripShine = False
@@ -608,75 +590,57 @@ class Pass():
         z_file.close()
         return file_name
 
-
     def json_dict(self):
-        """
-        Return Pass as JSON Dict
-        """
-        simple_fields = [
-            'description',
-            'formatVersion',
-            'organizationName',
-            'passTypeIdentifier',
-            'serialNumber',
-            'teamIdentifier',
-            'suppressStripShine'
-            'relevantDate',
-            'backgroundColor',
-            'foregroundColor',
-            'labelColor',
-            'logoText',
-            'ibeacons',
-            'userInfo',
-            'voided',
-            'associatedStoreIdentifiers',
-            'appLaunchURL',
-            'exprirationDate',
-            'webServiceURL',
-            'authenticationToken',
-        ]
-        data = {}
-        data[self.passInformation.jsonname] = self.passInformation.json_dict()
-        for field in simple_fields:
-            if hasattr(self, field):
-                content = getattr(self, field)
-                if content:
-                    field_checks(field, content)
-                    data[field] = content
-
-        if self.barcodes:
-            data['barcodes'] = []
-            for barcode in self.barcodes:
-                data['barcodes'].append(barcode.json_dict())
-
+        d = {
+            'description': self.description,
+            'formatVersion': self.formatVersion,
+            'organizationName': self.organizationName,
+            'passTypeIdentifier': self.passTypeIdentifier,
+            'serialNumber': self.serialNumber,
+            'teamIdentifier': self.teamIdentifier,
+            'suppressStripShine': self.suppressStripShine,
+            self.passInformation.jsonname: self.passInformation.json_dict()
+        }
+        if self.barcode:
+            d.update({'barcode': self.barcode.json_dict()})
+        if self.relevantDate:
+            d.update({'relevantDate': self.relevantDate})
+        if self.backgroundColor:
+            d.update({'backgroundColor': self.backgroundColor})
+        if self.foregroundColor:
+            d.update({'foregroundColor': self.foregroundColor})
+        if self.labelColor:
+            d.update({'labelColor': self.labelColor})
+        if self.logoText:
+            d.update({'logoText': self.logoText})
         if self.locations:
-            data['locations'] = []
-            for location in self.locations:
-                data['locations'].append(location.json_dict())
-            if len(data['locations']) >= 10:
-                raise PassParameterException("Field locations has more then 10 entries")
-
+            d.update({'locations': self.locations})
         if self.ibeacons:
-            data['ibeacons'] = []
-            for ibeacon in self.ibeacons:
-                data['ibeacons'].append(ibeacon.json_dict())
-
-        requied_fields = [
-            'description', 'formatVersion',
-            'organizationName', 'organizationName',
-            'serialNumber', 'teamIdentifier'
-        ]
-        for field in requied_fields:
-            if field not in data:
-                raise PassParameterException("Field {} missing".format(field))
-        return data
+            d.update({'beacons': self.ibeacons})
+        if self.userInfo:
+            d.update({'userInfo': self.userInfo})
+        if self.associatedStoreIdentifiers:
+            d.update(
+                {'associatedStoreIdentifiers': self.associatedStoreIdentifiers}
+            )
+        if self.appLaunchURL:
+            d.update({'appLaunchURL': self.appLaunchURL})
+        if self.exprirationDate:
+            d.update({'expirationDate': self.exprirationDate})
+        if self.voided:
+            d.update({'voided': True})
+        if self.webServiceURL:
+            d.update({'webServiceURL': self.webServiceURL,
+                      'authenticationToken': self.authenticationToken})
+        return d
 
 
 def pass_handler(obj):
-    """ Pass Handler """
     if hasattr(obj, 'json_dict'):
         return obj.json_dict()
-    # For Decimal latitude and logitude etc.
-    if isinstance(obj, decimal.Decimal):
-        return str(obj)
-    return obj
+    else:
+        # For Decimal latitude and logitude etc.
+        if isinstance(obj, decimal.Decimal):
+            return str(obj)
+        else:
+            return obj
